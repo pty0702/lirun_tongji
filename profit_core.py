@@ -274,8 +274,11 @@ def process_cost_table(filepath):
 # 订单表处理与利润计算
 # ============================================================
 
-def process_orders(order_filepath, cost_map, start_date=None, end_date=None, order_status=None):
+def process_orders(order_filepath, cost_map, start_date=None, end_date=None, order_statuses=None):
     """读取订单表、清洗、匹配成本、计算利润
+
+    参数:
+        order_statuses: 订单状态列表（多选），为 None 或空列表时不过滤
 
     返回:
         detail_rows: 商品ID编码明细节记录
@@ -313,10 +316,10 @@ def process_orders(order_filepath, cost_map, start_date=None, end_date=None, ord
             if submit_time > end_date:
                 continue
 
-        # 订单状态筛选
-        if order_status and status_col:
+        # 订单状态筛选（支持多选）
+        if order_statuses and status_col:
             order_status_val = clean_str(row[status_col])
-            if order_status_val != order_status:
+            if order_status_val not in order_statuses:
                 continue
 
         # 构建基础记录
@@ -515,11 +518,15 @@ def write_header(ws, headers, fill=None):
 
 def write_sheet1_detail(ws, detail_records):
     """Sheet1: 商品ID编码明细"""
+    # 检查是否有「来源文件」字段（多订单表合并时会有）
+    has_source = any('来源文件' in rec for rec in detail_records)
     headers = [
         '商品ID', '商家编码', '成本单价', '编码对应订单行数',
         '编码对应商品数量', '编码对应总成本', '编码对应总收入',
         '编码对应总利润', 'ID对应总利润', '状态',
     ]
+    if has_source:
+        headers.append('来源文件')
     write_header(ws, headers)
     ws.freeze_panes = 'A2'
     ws.auto_filter.ref = ws.dimensions
@@ -539,6 +546,8 @@ def write_sheet1_detail(ws, detail_records):
         c9 = ws.cell(row=i, column=9, value=rec['ID对应总利润'])
         c9.number_format = '#,##0.00'
         ws.cell(row=i, column=10, value=rec['状态'])
+        if has_source:
+            ws.cell(row=i, column=11, value=rec.get('来源文件', ''))
 
     auto_width(ws)
 
@@ -571,10 +580,13 @@ def write_sheet2_summary(ws, summary_records):
 
 def write_sheet3_anomaly(ws, anomaly_rows):
     """Sheet3: 异常明细"""
+    has_source = any('来源文件' in rec for rec in anomaly_rows)
     headers = [
         '异常类型', '商品ID', '商家编码', '商品数量',
         '商家收入', '订单提交时间', '订单号', '原因',
     ]
+    if has_source:
+        headers.append('来源文件')
     # 异常明细用醒目样式
     header_fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
     write_header(ws, headers, fill=header_fill)
@@ -590,6 +602,8 @@ def write_sheet3_anomaly(ws, anomaly_rows):
         ws.cell(row=i, column=6, value=str(rec['订单提交时间']) if rec['订单提交时间'] else '')
         ws.cell(row=i, column=7, value=rec['订单号'])
         ws.cell(row=i, column=8, value=rec['原因'])
+        if has_source:
+            ws.cell(row=i, column=9, value=rec.get('来源文件', ''))
 
     auto_width(ws)
 
@@ -644,16 +658,17 @@ def generate_output_excel(detail_records, summary_records, anomaly_rows,
 # 主流程
 # ============================================================
 
-def run_calculation(order_filepath, cost_filepath, output_dir,
-                    start_date=None, end_date=None, order_status=None, log_func=None):
-    """执行完整的利润计算流程
+def run_calculation(order_filepaths, cost_filepath, output_dir,
+                    start_date=None, end_date=None, order_statuses=None, log_func=None):
+    """执行完整的利润计算流程（支持多个订单表 + 同一成本表）
 
     参数:
-        order_filepath: 订单表路径
+        order_filepaths: 订单表路径列表 (list of str)，支持多个订单表
         cost_filepath: 成本表路径
         output_dir: 输出目录
         start_date: 开始日期 (datetime 或 None)
         end_date: 结束日期 (datetime 或 None)
+        order_statuses: 订单状态列表 (list of str 或 None)，支持多选
         log_func: 日志回调函数
 
     返回:
@@ -668,7 +683,7 @@ def run_calculation(order_filepath, cost_filepath, output_dir,
     log("=" * 60)
     log("开始利润计算...")
 
-    # 1. 处理成本表
+    # 1. 处理成本表（所有订单表共用）
     log(f"\n[1/5] 读取成本表: {os.path.basename(cost_filepath)}")
     cost_map, cost_snapshot = process_cost_table(cost_filepath)
     log(f"  成本表行数: {len(cost_snapshot)}")
@@ -679,30 +694,112 @@ def run_calculation(order_filepath, cost_filepath, output_dir,
     log(f"  正常: {normal_cost}, 成本重复: {dup_cost}, 编码为空: {empty_cost}, 成本异常: {bad_cost}")
     log(f"  可用于匹配的编码数量: {len(cost_map)}")
 
-    # 2. 处理订单表
-    log(f"\n[2/5] 读取订单表: {os.path.basename(order_filepath)}")
-    df_order = pd.read_excel(order_filepath)
-    log(f"  订单表总行数: {len(df_order)}")
+    # 2. 遍历处理每个订单表
+    total_order_rows = 0
+    all_detail_records = []
+    all_summary_records = []
+    all_anomaly_rows = []
 
-    # 3. 识别字段
-    log("\n[3/5] 识别字段...")
-    col_map = identify_order_columns(df_order)
-    for key, val in col_map.items():
-        log(f"  {key} -> [{val}]")
+    for idx, order_filepath in enumerate(order_filepaths):
+        log(f"\n[2.{idx+1}/5] 读取订单表 [{idx+1}/{len(order_filepaths)}]: {os.path.basename(order_filepath)}")
+        df_order = pd.read_excel(order_filepath)
+        total_order_rows += len(df_order)
+        log(f"  订单表行数: {len(df_order)}")
 
-    # 4. 计算
-    log("\n[4/5] 执行利润计算...")
-    if order_status:
-        log(f"  订单状态筛选: {order_status}")
-    detail_records, summary_records, anomaly_rows = process_orders(
-        order_filepath, cost_map, start_date, end_date, order_status
-    )
-    log(f"  商品ID编码明细节行数: {len(detail_records)}")
-    log(f"  商品ID汇总行数: {len(summary_records)}")
-    log(f"  异常明细行数: {len(anomaly_rows)}")
+        # 识别字段
+        col_map = identify_order_columns(df_order)
+        if idx == 0:
+            log("  识别字段（首个订单表）:")
+            for key, val in col_map.items():
+                log(f"    {key} -> [{val}]")
 
-    # 5. 输出
-    log("\n[5/5] 生成输出 Excel...")
+        # 执行利润计算
+        detail_records, summary_records, anomaly_rows = process_orders(
+            order_filepath, cost_map, start_date, end_date, order_statuses
+        )
+        log(f"  正常编码明细节: {len(detail_records)} 行")
+        log(f"  商品ID汇总: {len(summary_records)} 行")
+        log(f"  异常明细: {len(anomaly_rows)} 行")
+
+        # 给明细记录标记来源文件（用于合并后追溯）
+        source_name = os.path.basename(order_filepath)
+        for rec in detail_records:
+            rec['来源文件'] = source_name
+        for rec in anomaly_rows:
+            rec['来源文件'] = source_name
+
+        all_detail_records.extend(detail_records)
+        all_summary_records.extend(summary_records)
+        all_anomaly_rows.extend(anomaly_rows)
+
+    # 3. 合并汇总：同商品ID的汇总行需要合并
+    log(f"\n[3/5] 合并多个订单表数据...")
+    log(f"  合并前: 明细节 {len(all_detail_records)} 行, 汇总 {len(all_summary_records)} 行, 异常 {len(all_anomaly_rows)} 行")
+
+    # 合并 detail records：相同 (商品ID, 商家编码) 的需要重新聚合
+    if len(order_filepaths) > 1 and len(all_detail_records) > 0:
+        detail_df = pd.DataFrame(all_detail_records)
+        grouped = detail_df.groupby(['商品ID', '商家编码'], dropna=False)
+
+        merged_detail = []
+        for (pid, mcode), grp in grouped:
+            order_lines = grp['编码对应订单行数'].sum()
+            total_qty = grp['编码对应商品数量'].sum()
+            cost_price = grp['成本单价'].iloc[0]
+            total_cost = cost_price * total_qty
+            total_income = grp['编码对应总收入'].sum()
+            total_profit = total_income - total_cost
+            sources = ', '.join(sorted(set(grp['来源文件'].dropna())))
+
+            merged_detail.append({
+                '商品ID': pid,
+                '商家编码': mcode,
+                '成本单价': cost_price,
+                '编码对应订单行数': int(order_lines),
+                '编码对应商品数量': total_qty,
+                '编码对应总成本': round(total_cost, 2),
+                '编码对应总收入': round(total_income, 2),
+                '编码对应总利润': round(total_profit, 2),
+                '_total_profit': total_profit,
+                '来源文件': sources,
+                '状态': '正常',
+            })
+
+        # 计算 ID对应总利润
+        id_profit_map = {}
+        for rec in merged_detail:
+            pid = rec['商品ID']
+            id_profit_map[pid] = id_profit_map.get(pid, 0) + rec['_total_profit']
+
+        for rec in merged_detail:
+            rec['ID对应总利润'] = round(id_profit_map[rec['商品ID']], 2)
+            del rec['_total_profit']
+
+        all_detail_records = merged_detail
+
+    # 合并 summary records：相同 商品ID 的需要合并
+    if len(order_filepaths) > 1 and len(all_summary_records) > 0:
+        summary_df = pd.DataFrame(all_summary_records)
+        grouped = summary_df.groupby('商品ID', dropna=False)
+
+        merged_summary = []
+        for pid, grp in grouped:
+            merged_summary.append({
+                '商品ID': pid,
+                '订单行数': int(grp['订单行数'].sum()),
+                '商品数量合计': grp['商品数量合计'].sum(),
+                '总收入': round(grp['总收入'].sum(), 2),
+                '总成本': round(grp['总成本'].sum(), 2),
+                '总利润': round(grp['总利润'].sum(), 2),
+                '异常编码数量': int(grp['异常编码数量'].max()),  # 取最大，因为不同文件可能有相同异常编码
+                '异常订单行数': int(grp['异常订单行数'].sum()),
+            })
+        all_summary_records = merged_summary
+
+    log(f"  合并后: 明细节 {len(all_detail_records)} 行, 汇总 {len(all_summary_records)} 行, 异常 {len(all_anomaly_rows)} 行")
+
+    # 4. 输出
+    log("\n[4/5] 生成输出 Excel...")
 
     # 生成文件名
     if start_date and end_date:
@@ -712,25 +809,35 @@ def run_calculation(order_filepath, cost_filepath, output_dir,
     else:
         filename = "利润统计结果_全部数据"
 
-    if order_status:
-        filename += f"_{order_status}"
+    if order_statuses:
+        status_str = '_'.join(order_statuses)
+        # 文件名不能太长
+        if len(status_str) > 50:
+            status_str = status_str[:47] + '...'
+        filename += f"_{status_str}"
+
+    # 多订单表时追加标识
+    if len(order_filepaths) > 1:
+        filename += f"_共{len(order_filepaths)}个订单表"
 
     filename += ".xlsx"
 
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, filename)
-    generate_output_excel(detail_records, summary_records, anomaly_rows,
+    generate_output_excel(all_detail_records, all_summary_records, all_anomaly_rows,
                           cost_snapshot, output_path)
 
     log(f"\n{'=' * 60}")
     log(f"计算完成!")
     log(f"输出文件: {output_path}")
 
+    normal_lines = sum(r['编码对应订单行数'] for r in all_detail_records)
+
     stats = {
-        '订单表行数': len(df_order),
+        '订单表行数': total_order_rows,
         '成本表行数': len(cost_snapshot),
-        '正常参与计算行数': sum(r['编码对应订单行数'] for r in detail_records),
-        '异常行数': len(anomaly_rows),
+        '正常参与计算行数': normal_lines,
+        '异常行数': len(all_anomaly_rows),
         '输出文件': output_path,
     }
 
@@ -788,7 +895,7 @@ def main():
 
     try:
         output_path, stats = run_calculation(
-            order_file, cost_file, output_dir,
+            [order_file], cost_file, output_dir,
             start_date=start_date, end_date=end_date
         )
         print("\n" + "=" * 60)

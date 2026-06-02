@@ -11,7 +11,7 @@ import sys
 import subprocess
 import threading
 from datetime import datetime
-from tkinter import Tk, Frame, Label, Button, Entry, Text, Scrollbar
+from tkinter import Tk, Frame, Label, Button, Entry, Text, Scrollbar, Listbox, MULTIPLE
 from tkinter import filedialog, messagebox, END, VERTICAL, HORIZONTAL, BOTH, LEFT, RIGHT, Y, X, W, E, N, S
 from tkinter.ttk import Progressbar, Separator, Combobox
 
@@ -31,7 +31,7 @@ class ProfitApp:
         self.root.minsize(650, 550)
 
         # 状态变量
-        self.order_path = None
+        self.order_paths = []  # 订单表路径列表（支持多个）
         self.cost_path = None
         self.output_dir = None
         self.last_output_path = None  # 计算成功后记录输出文件路径
@@ -57,15 +57,35 @@ class ProfitApp:
         file_frame = Frame(main_frame)
         file_frame.pack(fill=X, pady=(0, 5))
 
-        # 订单表
+        # 订单表（支持多文件）
+        row0_label = Frame(file_frame)
+        row0_label.pack(fill=X, pady=(3, 0))
+        Label(row0_label, text="订单表：", width=10, anchor=W,
+              font=("Microsoft YaHei", 10)).pack(side=LEFT)
+        Label(row0_label, text="（支持多选，共用同一成本表）",
+              fg="#999999", font=("Microsoft YaHei", 8)).pack(side=LEFT)
+
         row0 = Frame(file_frame)
         row0.pack(fill=X, pady=3)
-        Label(row0, text="订单表：", width=10, anchor=W,
-              font=("Microsoft YaHei", 10)).pack(side=LEFT)
-        self.order_entry = Entry(row0, font=("Microsoft YaHei", 9))
-        self.order_entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
-        Button(row0, text="选择文件", command=self._select_order,
-               width=9, font=("Microsoft YaHei", 9)).pack(side=LEFT)
+
+        # 左侧：文件列表
+        list_frame = Frame(row0)
+        list_frame.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+
+        self.order_listbox = Listbox(list_frame, height=4, font=("Microsoft YaHei", 9))
+        self.order_listbox.pack(side=LEFT, fill=X, expand=True)
+
+        order_scroll = Scrollbar(list_frame, orient=VERTICAL, command=self.order_listbox.yview)
+        order_scroll.pack(side=RIGHT, fill=Y)
+        self.order_listbox.config(yscrollcommand=order_scroll.set)
+
+        # 右侧：操作按钮
+        order_btn_frame = Frame(row0)
+        order_btn_frame.pack(side=LEFT)
+        Button(order_btn_frame, text="添加文件", command=self._add_order_files,
+               width=9, font=("Microsoft YaHei", 9)).pack(pady=(0, 2))
+        Button(order_btn_frame, text="移除选中", command=self._remove_order_files,
+               width=9, font=("Microsoft YaHei", 9)).pack()
 
         # 成本表
         row1 = Frame(file_frame)
@@ -129,14 +149,30 @@ class ProfitApp:
 
         Label(status_inner, text="订单状态：", width=10, anchor=W,
               font=("Microsoft YaHei", 10)).grid(row=0, column=0, sticky=W, pady=3)
-        self.status_combo = Combobox(status_inner, width=16,
-                                     font=("Microsoft YaHei", 9), state='readonly')
-        self.status_combo.grid(row=0, column=1, sticky=W, padx=(0, 5))
-        self.status_combo['values'] = ['全部']
-        self.status_combo.set("全部")
 
-        Label(status_inner, text="选择订单文件后自动加载可用状态",
-              fg="#999999", font=("Microsoft YaHei", 9)).grid(row=0, column=2, sticky=W)
+        # 状态列表（多选）
+        status_list_frame = Frame(status_inner)
+        status_list_frame.grid(row=0, column=1, sticky=W, padx=(0, 5))
+
+        self.status_listbox = Listbox(status_list_frame, width=16, height=5,
+                                       font=("Microsoft YaHei", 9),
+                                       selectmode=MULTIPLE, exportselection=False)
+        self.status_listbox.pack(side=LEFT, fill=Y)
+
+        status_scroll = Scrollbar(status_list_frame, orient=VERTICAL, command=self.status_listbox.yview)
+        status_scroll.pack(side=RIGHT, fill=Y)
+        self.status_listbox.config(yscrollcommand=status_scroll.set)
+
+        # 全选/取消按钮
+        status_btn_frame = Frame(status_inner)
+        status_btn_frame.grid(row=0, column=2, sticky=W)
+        Button(status_btn_frame, text="全选", command=self._select_all_statuses,
+               width=5, font=("Microsoft YaHei", 8)).pack(pady=(0, 2))
+        Button(status_btn_frame, text="取消", command=self._deselect_all_statuses,
+               width=5, font=("Microsoft YaHei", 8)).pack()
+
+        Label(status_inner, text="可多选（Ctrl+点击），不选=全部",
+              fg="#999999", font=("Microsoft YaHei", 9)).grid(row=0, column=3, sticky=W)
 
         # 分隔线
         Separator(main_frame, orient=HORIZONTAL).pack(fill=X, pady=(10, 5))
@@ -198,10 +234,11 @@ class ProfitApp:
         self.status_label.pack(fill=X, padx=8, pady=2)
 
         # 欢迎日志
-        self._log("欢迎使用利润统计工具 v2.0")
-        self._log("请选择订单表、成本表及输出目录，然后点击「开始计算」。")
+        self._log("欢迎使用利润统计工具 v2.1")
+        self._log("请添加订单表（支持多个）、选择成本表及输出目录，然后点击「开始计算」。")
+        self._log("多个订单表将使用同一成本表合并计算。")
         self._log("日期筛选为可选项，不填则统计全部数据。")
-        self._log("订单状态筛选为可选项，选择订单文件后自动加载可用状态。")
+        self._log("订单状态支持多选（Ctrl+点击），不选=全部状态。")
 
     # ============================================================
     # 自动检测文件
@@ -229,9 +266,8 @@ class ProfitApp:
                 detected_order = full
 
         if detected_order:
-            self.order_path = detected_order
-            self.order_entry.delete(0, END)
-            self.order_entry.insert(0, detected_order)
+            self.order_paths.append(detected_order)
+            self.order_listbox.insert(END, detected_order)
             self._log(f"[自动检测] 订单表: {os.path.basename(detected_order)}")
 
         if detected_cost:
@@ -247,7 +283,7 @@ class ProfitApp:
         self.output_entry.insert(0, default_output)
 
         # 自动加载订单状态
-        if detected_order:
+        if self.order_paths:
             self._load_order_statuses()
 
     # ============================================================
@@ -255,39 +291,65 @@ class ProfitApp:
     # ============================================================
 
     def _load_order_statuses(self):
-        """从订单文件中读取可用的订单状态列表，填充到下拉框"""
-        order_path = self.order_path or self.order_entry.get().strip()
-        if not order_path or not os.path.exists(order_path):
-            return
+        """从所有已选订单文件中读取可用的订单状态列表，合并后填充到多选列表"""
+        all_statuses = set()
+        for order_path in self.order_paths:
+            if not order_path or not os.path.exists(order_path):
+                continue
+            try:
+                statuses = get_unique_statuses(order_path)
+                if statuses:
+                    all_statuses.update(statuses)
+            except Exception as e:
+                self._log(f"[状态加载] 读取 {os.path.basename(order_path)} 状态失败: {e}")
 
-        try:
-            statuses = get_unique_statuses(order_path)
-            if statuses:
-                self.status_combo['values'] = ['全部'] + statuses
-                self.status_combo.set("全部")
-                self._log(f"[状态加载] 可用订单状态: {', '.join(statuses)}")
-            else:
-                self.status_combo['values'] = ['全部']
-                self.status_combo.set("全部")
-                self._log("[状态加载] 订单表中未找到「订单状态」列")
-        except Exception as e:
-            self.status_combo['values'] = ['全部']
-            self.status_combo.set("全部")
-            self._log(f"[状态加载] 读取状态失败: {e}")
+        # 更新列表
+        self.status_listbox.delete(0, END)
+        if all_statuses:
+            for s in sorted(all_statuses):
+                self.status_listbox.insert(END, s)
+            self._log(f"[状态加载] 可用订单状态: {', '.join(sorted(all_statuses))}")
+        else:
+            self._log("[状态加载] 订单表中未找到「订单状态」列")
 
-    def _select_order(self):
-        path = filedialog.askopenfilename(
-            title="选择订单表",
+    def _add_order_files(self):
+        """添加订单表文件（支持多选）"""
+        paths = filedialog.askopenfilenames(
+            title="选择订单表（可多选）",
             initialdir=self.last_dir,
             filetypes=[("Excel 文件", "*.xlsx *.xls"), ("所有文件", "*.*")]
         )
-        if path:
-            self.order_path = path
-            self.last_dir = os.path.dirname(path)
-            self.order_entry.delete(0, END)
-            self.order_entry.insert(0, path)
-            self._set_status(f"已选择订单表: {os.path.basename(path)}")
+        for path in paths:
+            if path and path not in self.order_paths:
+                self.order_paths.append(path)
+                self.order_listbox.insert(END, path)
+                self._set_status(f"已添加订单表: {os.path.basename(path)}")
+        if paths:
+            self.last_dir = os.path.dirname(paths[0])
             self._load_order_statuses()
+
+    def _remove_order_files(self):
+        """移除选中的订单表文件"""
+        selected = self.order_listbox.curselection()
+        if not selected:
+            messagebox.showinfo("提示", "请先在列表中选择要移除的文件")
+            return
+        # 从后往前删除，避免索引错乱
+        for idx in reversed(selected):
+            path = self.order_listbox.get(idx)
+            self.order_listbox.delete(idx)
+            if path in self.order_paths:
+                self.order_paths.remove(path)
+            self._set_status(f"已移除: {os.path.basename(path)}")
+        self._load_order_statuses()
+
+    def _select_all_statuses(self):
+        """全选所有订单状态"""
+        self.status_listbox.select_set(0, END)
+
+    def _deselect_all_statuses(self):
+        """取消全选订单状态"""
+        self.status_listbox.selection_clear(0, END)
 
     def _select_cost(self):
         path = filedialog.askopenfilename(
@@ -352,13 +414,14 @@ class ProfitApp:
     # ============================================================
 
     def _start_calculation(self):
-        order_path = self.order_path or self.order_entry.get().strip()
+        # 收集订单表路径
+        order_paths = list(self.order_paths)  # 复制一份，避免计算中途被修改
         cost_path = self.cost_path or self.cost_entry.get().strip()
         output_dir = self.output_dir or self.output_entry.get().strip()
 
         # 验证输入
-        if not order_path:
-            messagebox.showwarning("提示", "请先选择订单表文件")
+        if not order_paths:
+            messagebox.showwarning("提示", "请先添加至少一个订单表文件")
             return
         if not cost_path:
             messagebox.showwarning("提示", "请先选择成本表文件")
@@ -366,9 +429,10 @@ class ProfitApp:
         if not output_dir:
             messagebox.showwarning("提示", "请先选择输出目录")
             return
-        if not os.path.exists(order_path):
-            messagebox.showerror("错误", f"订单表文件不存在:\n{order_path}")
-            return
+        for op in order_paths:
+            if not os.path.exists(op):
+                messagebox.showerror("错误", f"订单表文件不存在:\n{op}")
+                return
         if not os.path.exists(cost_path):
             messagebox.showerror("错误", f"成本表文件不存在:\n{cost_path}")
             return
@@ -394,9 +458,12 @@ class ProfitApp:
                 messagebox.showerror("日期格式错误", str(e))
                 return
 
-        # 获取订单状态筛选
-        selected_status = self.status_combo.get()
-        order_status = None if selected_status == "全部" else selected_status
+        # 获取订单状态筛选（多选列表）
+        selected_indices = self.status_listbox.curselection()
+        if selected_indices:
+            order_statuses = [self.status_listbox.get(i) for i in selected_indices]
+        else:
+            order_statuses = None  # 未选择任何状态 = 全部
 
         # 清空日志和上次结果
         self.log_text.delete(1.0, END)
@@ -415,9 +482,9 @@ class ProfitApp:
         def run():
             try:
                 output_path, stats = run_calculation(
-                    order_path, cost_path, output_dir,
+                    order_paths, cost_path, output_dir,
                     start_date=start_date, end_date=end_date,
-                    order_status=order_status,
+                    order_statuses=order_statuses,
                     log_func=self._log
                 )
                 self.root.after(0, lambda: self._on_success(output_path, stats))
