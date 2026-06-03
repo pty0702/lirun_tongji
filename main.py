@@ -26,7 +26,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 class ProfitApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("利润统计工具 v2.0")
+        self.root.title("利润统计工具 v2.2")
         self.root.geometry("780x680")
         self.root.minsize(650, 550)
 
@@ -198,8 +198,15 @@ class ProfitApp:
                                 height=1, width=10)
         self.clear_btn.pack(side=LEFT)
 
-        self.progress = Progressbar(btn_frame, mode='indeterminate', length=180)
-        # 默认隐藏，计算时显示
+        # 进度条容器（默认隐藏，计算时显示）
+        self.progress_frame = Frame(btn_frame)
+        self.progress = Progressbar(self.progress_frame, mode='determinate',
+                                     maximum=100, length=180)
+        self.progress.pack(side=LEFT, padx=(0, 5))
+        self.progress_label = Label(self.progress_frame, text="0%",
+                                     font=("Microsoft YaHei", 9), fg="#666666",
+                                     width=4, anchor=W)
+        self.progress_label.pack(side=LEFT)
 
         # ---- 统计摘要区域 ----
         self.stats_frame = Frame(main_frame, bg="#F2F2F2", padx=10, pady=5)
@@ -234,7 +241,7 @@ class ProfitApp:
         self.status_label.pack(fill=X, padx=8, pady=2)
 
         # 欢迎日志
-        self._log("欢迎使用利润统计工具 v2.1")
+        self._log("欢迎使用利润统计工具 v2.2")
         self._log("请添加订单表（支持多个）、选择成本表及输出目录，然后点击「开始计算」。")
         self._log("多个订单表将使用同一成本表合并计算。")
         self._log("日期筛选为可选项，不填则统计全部数据。")
@@ -474,9 +481,14 @@ class ProfitApp:
         # 禁用按钮，显示进度
         self.calc_btn.config(state='disabled', text="计算中...", bg="#8DB4E2")
         self.clear_btn.config(state='disabled')
-        self.progress.pack(side=LEFT, padx=(12, 0))
-        self.progress.start()
+        self.progress['value'] = 0
+        self.progress_label.config(text="0%")
+        self.progress_frame.pack(side=LEFT, padx=(12, 0))
         self._set_status("正在计算...")
+
+        # 进度回调（在后台线程中通过 root.after 调度到主线程更新 UI）
+        def update_progress(percent, message):
+            self.root.after(0, lambda: self._on_progress(percent, message))
 
         # 后台线程执行计算
         def run():
@@ -485,7 +497,8 @@ class ProfitApp:
                     order_paths, cost_path, output_dir,
                     start_date=start_date, end_date=end_date,
                     order_statuses=order_statuses,
-                    log_func=self._log
+                    log_func=self._log,
+                    progress_func=update_progress
                 )
                 self.root.after(0, lambda: self._on_success(output_path, stats))
             except Exception as e:
@@ -495,9 +508,14 @@ class ProfitApp:
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _on_progress(self, percent, message):
+        """更新进度条和状态（主线程安全）"""
+        self.progress['value'] = percent
+        self.progress_label.config(text=f"{percent}%")
+        self._set_status(message)
+
     def _on_success(self, output_path, stats):
-        self.progress.stop()
-        self.progress.pack_forget()
+        self.progress_frame.pack_forget()
         self.calc_btn.config(state='normal', text="▶  开始计算", bg="#4472C4")
         self.clear_btn.config(state='normal')
 
@@ -523,8 +541,7 @@ class ProfitApp:
         )
 
     def _on_error(self, error_msg, traceback_str):
-        self.progress.stop()
-        self.progress.pack_forget()
+        self.progress_frame.pack_forget()
         self.calc_btn.config(state='normal', text="▶  开始计算", bg="#4472C4")
         self.clear_btn.config(state='normal')
 
